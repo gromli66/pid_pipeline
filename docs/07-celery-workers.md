@@ -111,7 +111,7 @@ def task_detect_yolo(self, diagram_uid: str):
 4. Сохранить `pipe_mask.png`
 5. Обновить статус → `segmented`
 
-**Status:** 🔄 Phase 3
+**Status:**  Phase 3
 
 ---
 
@@ -130,7 +130,7 @@ def task_detect_yolo(self, diagram_uid: str):
 3. Сохранить `skeleton.png`
 4. Обновить статус → `skeletonized`
 
-**Status:** 🔄 Phase 3
+**Status:**  Phase 3
 
 ---
 
@@ -145,7 +145,7 @@ def task_detect_yolo(self, diagram_uid: str):
 
 **Вызывается:** После валидации масок (Phase 4)
 
-**Status:** 🔄 Phase 4
+**Status:**  Phase 4
 
 ---
 
@@ -165,7 +165,7 @@ def task_detect_yolo(self, diagram_uid: str):
 4. Сохранить `junction_mask.png`, `bridge_mask.png`
 5. Обновить статус → `classified`
 
-**Status:** 🔄 Phase 4
+**Status:**  Phase 4
 
 ---
 
@@ -184,7 +184,7 @@ def task_detect_yolo(self, diagram_uid: str):
 3. Сохранить `graph.json`
 4. Обновить статус → `built`
 
-**Status:** 🔄 Phase 5
+**Status:**  Phase 5
 
 ---
 
@@ -335,9 +335,9 @@ def task_example(self, diagram_uid):
 ### 3. Логировать важные этапы
 
 ```python
-print(f"🔍 Starting detection for {diagram_uid}")
-print(f"✅ Detected {count} objects")
-print(f"❌ Detection failed: {error}")
+print(f" Starting detection for {diagram_uid}")
+print(f" Detected {count} objects")
+print(f" Detection failed: {error}")
 ```
 
 ### 4. Сохранять промежуточные результаты
