@@ -291,11 +291,11 @@ STORAGE_PATH=./test_storage
 async def lifespan(app: FastAPI):
     # Проверка обязательных настроек
     if not settings.CVAT_TOKEN:
-        print("⚠️ Warning: CVAT_TOKEN not set")
+        print(" Warning: CVAT_TOKEN not set")
     
     if not Path(settings.STORAGE_PATH).exists():
         Path(settings.STORAGE_PATH).mkdir(parents=True)
-        print(f"📁 Created storage directory: {settings.STORAGE_PATH}")
+        print(f" Created storage directory: {settings.STORAGE_PATH}")
     
     yield
 ```
@@ -323,12 +323,12 @@ def check_config():
         errors.append(f"YOLO weights not found: {settings.YOLO_WEIGHTS}")
     
     if errors:
-        print("❌ Configuration errors:")
+        print(" Configuration errors:")
         for e in errors:
             print(f"  - {e}")
         return False
     
-    print("✅ Configuration OK")
+    print(" Configuration OK")
     return True
 
 if __name__ == "__main__":
