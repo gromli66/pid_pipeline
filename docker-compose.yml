@@ -1,0 +1,136 @@
+version: '3.8'
+
+services:
+  # ===========================================================================
+  # PostgreSQL - База данных
+  # ===========================================================================
+  postgres:
+    image: postgres:15-alpine
+    container_name: pid_postgres
+    environment:
+      POSTGRES_DB: ${DB_NAME:-pid_pipeline}
+      POSTGRES_USER: ${DB_USER:-pid_user}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-changeme}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-pid_user} -d ${DB_NAME:-pid_pipeline}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - pid_network
+
+  # ===========================================================================
+  # Redis - Message Broker для Celery
+  # ===========================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: pid_redis
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - pid_network
+
+  # ===========================================================================
+  # FastAPI - Backend API
+  # ===========================================================================
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: pid_api
+    environment:
+      - DATABASE_URL=postgresql://${DB_USER:-pid_user}:${DB_PASSWORD:-changeme}@postgres:5432/${DB_NAME:-pid_pipeline}
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - CVAT_URL=${CVAT_URL:-http://host.docker.internal:8080}
+      - CVAT_TOKEN=${CVAT_TOKEN}
+      - CVAT_PROJECT_ID=${CVAT_PROJECT_ID:-1}
+      - STORAGE_PATH=/storage/diagrams
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    volumes:
+      - ./app:/app/app
+      - ./worker:/app/worker
+      - ./configs:/app/configs
+      - storage_data:/storage
+    ports:
+      - "${API_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - pid_network
+
+  # ===========================================================================
+  # Celery Worker - GPU задачи
+  # ===========================================================================
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    container_name: pid_worker
+    environment:
+      - DATABASE_URL=postgresql://${DB_USER:-pid_user}:${DB_PASSWORD:-changeme}@postgres:5432/${DB_NAME:-pid_pipeline}
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - CVAT_URL=${CVAT_URL:-http://host.docker.internal:8080}
+      - CVAT_TOKEN=${CVAT_TOKEN}
+      - STORAGE_PATH=/storage/diagrams
+      - YOLO_WEIGHTS=${YOLO_WEIGHTS:-/models/yolo/best.pt}
+      - U2NET_WEIGHTS=${U2NET_WEIGHTS:-/models/u2net/best.pth}
+      - JUNCTION_WEIGHTS=${JUNCTION_WEIGHTS:-/models/junction/best.pth}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    volumes:
+      - ./worker:/app/worker
+      - ./modules:/app/modules
+      - ./app:/app/app
+      - storage_data:/storage
+      - ./models:/models
+      - ./configs:/app/configs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - pid_network
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+volumes:
+  postgres_data:
+    name: pid_postgres_data
+  redis_data:
+    name: pid_redis_data
+  storage_data:
+    name: pid_storage_data
+  models_data:
+    name: pid_models_data
+
+networks:
+  pid_network:
+    name: pid_network
+    driver: bridge

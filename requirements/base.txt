@@ -1,0 +1,27 @@
+# =============================================================================
+# Base requirements - общие для API и Worker
+# =============================================================================
+
+# Database
+sqlalchemy>=2.0.0
+psycopg2-binary>=2.9.9
+alembic>=1.13.0
+
+# Async
+asyncpg>=0.29.0
+aiofiles>=23.2.0
+
+# Pydantic
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+
+# Utils
+python-dotenv>=1.0.0
+httpx>=0.26.0
+tenacity>=8.2.0
+
+# Logging
+structlog>=24.1.0
+
+# Image processing
+Pillow>=10.2.0

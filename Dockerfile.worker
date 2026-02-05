@@ -1,0 +1,70 @@
+# =============================================================================
+# Dockerfile.worker - Celery Worker с GPU поддержкой
+# =============================================================================
+
+FROM nvidia/cuda:12.4.0-runtime-ubuntu22.04
+
+LABEL maintainer="P&ID Pipeline"
+LABEL description="Celery worker with GPU support for ML tasks"
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility \
+    DEBIAN_FRONTEND=noninteractive
+
+WORKDIR /app
+
+# Системные зависимости + Python 3.11
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    software-properties-common \
+    && add-apt-repository ppa:deadsnakes/ppa \
+    && apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 \
+    python3.11-venv \
+    python3.11-dev \
+    python3-pip \
+    libpq-dev \
+    gcc \
+    g++ \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender-dev \
+    libgomp1 \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
+
+# Устанавливаем python3.11 как default
+RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1 \
+    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
+
+# Обновляем pip
+RUN python -m pip install --upgrade pip
+
+# PyTorch с CUDA 12.4
+RUN pip install torch==2.6.0 torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cu124
+
+# Python зависимости
+COPY requirements/base.txt requirements/base.txt
+COPY requirements/worker.txt requirements/worker.txt
+RUN pip install --no-cache-dir -r requirements/worker.txt
+
+# Копируем worker
+COPY worker/ /app/worker/
+
+# Копируем ML модули
+COPY modules/ /app/modules/
+
+# Добавляем модули в PYTHONPATH
+ENV PYTHONPATH=/app:/app/modules:$PYTHONPATH
+
+# Запуск Celery worker
+CMD ["celery", "-A", "worker.celery_app", "worker", \
+     "--loglevel=info", \
+     "--concurrency=2", \
+     "--pool=prefork", \
+     "-Q", "default,gpu"]

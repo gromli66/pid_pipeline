@@ -1,0 +1,26 @@
+# =============================================================================
+# UI requirements - PySide6 Desktop Application
+# =============================================================================
+
+# Database (для прямого доступа если нужно)
+sqlalchemy>=2.0.0
+
+# Pydantic
+pydantic>=2.5.0
+
+# Qt - основной пакет (WebEngine включён на Windows)
+PySide6>=6.6.0
+
+# На Linux раскомментировать:
+# PySide6-WebEngine>=6.6.0
+
+# HTTP client
+httpx>=0.26.0
+
+# Image handling
+Pillow>=10.2.0
+numpy>=1.26.0,<2.0.0
+opencv-python>=4.9.0
+
+# Async Qt
+qasync>=0.27.0
