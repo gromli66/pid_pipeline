@@ -277,11 +277,11 @@ with open("scheme.png", "rb") as f:
 
 | Endpoint | Статус |
 |----------|--------|
-| POST /api/segmentation/{uid}/segment | 🔄 Phase 3 |
-| POST /api/skeleton/{uid}/skeletonize | 🔄 Phase 3 |
-| POST /api/junction/{uid}/classify | 🔄 Phase 4 |
-| POST /api/graph/{uid}/build | 🔄 Phase 5 |
-| POST /api/graph/{uid}/generate-fxml | 🔄 Phase 5 |
+| POST /api/segmentation/{uid}/segment |  Phase 3 |
+| POST /api/skeleton/{uid}/skeletonize |  Phase 3 |
+| POST /api/junction/{uid}/classify |  Phase 4 |
+| POST /api/graph/{uid}/build |  Phase 5 |
+| POST /api/graph/{uid}/generate-fxml |  Phase 5 |
 
 ---
 
