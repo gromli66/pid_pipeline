@@ -1,0 +1,57 @@
+    def export_annotations(
+        self,
+        task_id: int,
+        format_name: str = "COCO 1.0",
+        output_path: Optional[Path] = None,
+    ) -> Path:
+        """
+        кспортировать аннотации из task.
+        
+        CVAT API v2 требует:
+        1. POST /api/tasks/{id}/dataset?format=... для запуска экспорта
+        2. GET /api/tasks/{id}/dataset?format=...&action=download для скачивания
+        """
+        with httpx.Client(timeout=self.timeout * 3) as client:
+            headers = self._get_headers()
+            
+            # Шаг 1: апустить экспорт (POST)
+            response = client.post(
+                f"{self.base_url}/api/tasks/{task_id}/dataset",
+                headers=headers,
+                params={"format": format_name},
+            )
+            
+            # 202 = экспорт запущен, 201 = уже готов
+            if response.status_code not in (200, 201, 202):
+                response.raise_for_status()
+            
+            # Шаг 2: дём и скачиваем
+            max_attempts = 60
+            for attempt in range(max_attempts):
+                time.sleep(1)
+                
+                response = client.get(
+                    f"{self.base_url}/api/tasks/{task_id}/dataset",
+                    headers={**headers, "Accept": "*/*"},
+                    params={"format": format_name, "action": "download"},
+                    follow_redirects=True,
+                )
+                
+                if response.status_code == 200:
+                    break
+                elif response.status_code == 202:
+                    # щё готовится
+                    continue
+                else:
+                    response.raise_for_status()
+            else:
+                raise TimeoutError(f"Export not ready after {max_attempts} attempts")
+            
+            # Сохраняем файл
+            if output_path is None:
+                output_path = Path(f"task_{task_id}_annotations.zip")
+            
+            output_path = Path(output_path)
+            output_path.write_bytes(response.content)
+            
+            return output_path

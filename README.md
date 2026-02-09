@@ -2,42 +2,46 @@
 
 Приложение для автоматической обработки P&ID диаграмм с интегрированным CVAT.
 
-## 🏗️ Архитектура
+## Архитектура
 
 - **FastAPI** — Backend API
 - **Celery** — Фоновые задачи (ML inference на GPU)
 - **PostgreSQL** — База данных (отдельная для P&ID и CVAT)
 - **Redis** — Message broker
 - **CVAT** — Валидация аннотаций (встроен в docker-compose)
-- **PySide6** — Desktop UI (разработка)
+- **PySide6** — Desktop UI
 
-## 📁 Структура проекта
+## Структура проекта
 
 ```
 pid_pipeline/
 ├── app/                    # FastAPI Backend
 │   ├── api/                # API endpoints
+│   ├── core/               # Logging, shared utilities
 │   ├── models/             # SQLAlchemy models
 │   ├── schemas/            # Pydantic schemas
-│   └── services/           # Business logic
+│   ├── services/           # Business logic (CVATClient, Storage)
+│   └── db/                 # Database session, engine
 ├── worker/                 # Celery Workers
 │   └── tasks/              # Celery tasks
 ├── modules/                # ML модули
 │   └── yolo_detector/      # YOLO + SAHI детектор
 ├── ui/                     # PySide6 Desktop App
+│   ├── main.py             # Entry point
+│   ├── windows/            # MainWindow, CVATWindow
+│   ├── widgets/            # DiagramListWidget, UploadDialog
+│   └── services/           # APIClient, StatusProvider
 ├── storage/                # Файловое хранилище (bind mount)
-│   └── diagrams/           # Загруженные диаграммы
 ├── models/                 # ML веса (bind mount)
-│   └── yolo/best.pt        # YOLO веса
-├── configs/                # Конфигурации проектов
-│   └── projects/           # YAML конфиги
+├── configs/                # Конфигурации проектов (YAML)
 ├── alembic/                # Миграции БД
-│   └── versions/           # Файлы миграций
 ├── docker-compose.yml      # Unified: P&ID + CVAT
+├── .editorconfig           # Стиль кода
+├── .gitattributes          # Нормализация line endings
 └── .env                    # Конфигурация
 ```
 
-## 🚀 Быстрый старт
+## Быстрый старт
 
 ### 1. Клонирование и настройка
 
@@ -52,7 +56,6 @@ copy .env.example .env
 ### 2. Подготовить ML веса
 
 ```powershell
-# Скопировать YOLO веса в папку models
 copy C:\path\to\best.pt models\yolo\best.pt
 ```
 
@@ -62,12 +65,7 @@ copy C:\path\to\best.pt models\yolo\best.pt
 docker-compose up -d
 ```
 
-Это запустит:
-- P&ID API (порт 8000)
-- P&ID Worker (Celery + GPU)
-- CVAT (порт 8080)
-- PostgreSQL (порт 5433 для P&ID)
-- Redis
+Это запустит: P&ID API (порт 8000), P&ID Worker (Celery + GPU), CVAT (порт 8080), PostgreSQL, Redis.
 
 ### 4. Применить миграции БД
 
@@ -81,103 +79,125 @@ docker exec -it pid_api alembic upgrade head
 docker exec -it cvat_server bash -ic 'python3 ~/manage.py createsuperuser'
 ```
 
-Ввести:
-- Username: `admin`
-- Email: (можно пустой)
-- Password: `admin123`
-
 ### 6. Проверить работу
+
+```powershell
+# Health check (должен показать healthy для api, database, redis)
+Invoke-RestMethod http://localhost:8000/health
+```
 
 | Сервис | URL |
 |--------|-----|
 | P&ID API Docs | http://localhost:8000/docs |
-| CVAT UI | http://localhost:8080 |
 | Health Check | http://localhost:8000/health |
+| CVAT UI | http://localhost:8080 |
 
-## 📊 Использование API
+## Desktop UI
 
-### Загрузка диаграммы
+Desktop-приложение на PySide6 для управления пайплайном.
 
-```bash
-curl -X POST "http://localhost:8000/api/diagrams/upload" \
-  -F "file=@diagram.png" \
-  -F "project_code=thermohydraulics"
-```
-
-### Запуск детекции
-
-```bash
-curl -X POST "http://localhost:8000/api/detection/{uid}/detect"
-```
-
-### Получение статуса
-
-```bash
-curl "http://localhost:8000/api/diagrams/{uid}/status"
-```
-
-## 🔧 Разработка
-
-### Локальный запуск API (без Docker)
+### Запуск
 
 ```powershell
 # Активировать venv
-.venv\Scripts\activate
+.venv311\Scripts\activate
 
-# Установить зависимости
-pip install torch==2.6.0 torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cu124
-pip install -r requirements/api.txt
+# Запустить UI
+python -m ui.main
+```
 
-# Запустить только инфраструктуру в Docker
-docker-compose up -d postgres redis cvat_server cvat_ui traefik
+### Возможности
 
-# Запустить API локально
-uvicorn app.main:app --reload --port 8000
+- Загрузка P&ID диаграмм с выбором проекта
+- Запуск YOLO детекции одной кнопкой
+- Встроенный CVAT WebView для валидации аннотаций
+- Автоматический polling статуса (обновление каждые 2 сек)
+- Скачивание артефактов через API (оригинал, YOLO predicted/validated, COCO)
+- Фильтры по проекту, статусу, поиск по имени файла
+- Обработка ошибок: retry, перезагрузка оригинала
+
+### Архитектура UI
+
+```
+MainWindow (координатор, 287 строк)
+├── QTabWidget
+│   └── DiagramListWidget (таблица + фильтры + действия, 611 строк)
+├── StatusBar (🟢 API / 🔴 API недоступен)
+└── ToolBar (Загрузить, Обновить)
+
+CVATWindow (отдельное окно с QWebEngineView)
+
+Services:
+├── APIClient (persistent httpx.Client, retry с exponential backoff)
+└── StatusProvider (HTTP polling, auto-unwatch на финальных статусах)
+```
+
+## API
+
+### Основные endpoints
+
+```bash
+# Загрузка диаграммы
+curl -X POST "http://localhost:8000/api/diagrams/upload" \
+  -F "file=@diagram.png" \
+  -F "project_code=thermohydraulics"
+
+# Запуск детекции
+curl -X POST "http://localhost:8000/api/detection/{uid}/detect"
+
+# Статус
+curl "http://localhost:8000/api/diagrams/{uid}/status"
+
+# Скачивание артефакта
+curl -O "http://localhost:8000/api/diagrams/{uid}/download/original_image"
+
+# Health check
+curl "http://localhost:8000/health"
+```
+
+### Типы артефактов для скачивания
+
+| artifact_type | Описание |
+|---------------|----------|
+| `original_image` | Оригинальное изображение |
+| `yolo_predicted` | YOLO предсказания (до валидации) |
+| `yolo_validated` | YOLO после валидации в CVAT |
+| `coco_validated` | COCO JSON после валидации |
+
+Полный API Reference: [docs/06-api-reference.md](docs/06-api-reference.md)
+
+## Разработка
+
+### Перезапуск после изменений кода
+
+```powershell
+docker-compose restart api worker
+docker logs --tail 15 pid_api
 ```
 
 ### Создание новой миграции
 
 ```powershell
-# После изменения моделей
 docker exec -it pid_api alembic revision --autogenerate -m "Description"
-
-# Применить
 docker exec -it pid_api alembic upgrade head
+```
+
+### Нормализация line endings (одноразово)
+
+```bash
+git add --renormalize .
+git commit -m "Normalize line endings to LF"
 ```
 
 ### Просмотр логов
 
 ```powershell
-# API
-docker logs -f pid_api
-
-# Worker
-docker logs -f pid_worker
-
-# CVAT
-docker logs -f cvat_server
+docker logs -f pid_api      # API
+docker logs -f pid_worker   # Worker
+docker logs -f cvat_server  # CVAT
 ```
 
-## 🐳 Docker команды
-
-```powershell
-# Запуск
-docker-compose up -d
-
-# Остановка
-docker-compose down
-
-# Перезапуск одного сервиса
-docker-compose restart api
-
-# Пересборка после изменений
-docker-compose up -d --build api worker
-
-# Полная очистка (удаляет данные!)
-docker-compose down -v
-```
-
-## 📋 Статусы обработки диаграммы
+## Статусы обработки диаграммы
 
 ```
 uploaded → detecting → detected → validating_bbox → validated_bbox
@@ -187,7 +207,7 @@ uploaded → detecting → detected → validating_bbox → validated_bbox
 → generating_fxml → completed
 ```
 
-## 📚 Документация
+## Документация
 
 - [Обзор системы](docs/01-overview.md)
 - [Архитектура](docs/02-architecture.md)
@@ -200,7 +220,7 @@ uploaded → detecting → detected → validating_bbox → validated_bbox
 - [Разработка](docs/09-development.md)
 - [Troubleshooting](docs/10-troubleshooting.md)
 
-## 🔑 Переменные окружения
+## Переменные окружения
 
 Основные переменные в `.env`:
 
@@ -212,10 +232,3 @@ uploaded → detecting → detected → validating_bbox → validated_bbox
 | `CVAT_SUPERUSER_PASSWORD` | Пароль CVAT | `admin123` |
 | `YOLO_DEVICE` | Устройство для YOLO | `cuda` |
 | `LOG_LEVEL` | Уровень логирования | `INFO` |
-
-## ⚠️ Важно
-
-1. **YOLO веса** должны лежать в `models/yolo/best.pt`
-2. **Миграции** применяются один раз при первом запуске
-3. **CVAT суперпользователь** создаётся вручную после первого запуска
-4. **Storage** использует bind mount — файлы видны в `storage/diagrams/`

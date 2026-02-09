@@ -22,6 +22,8 @@ pid_pipeline/
 ├── alembic.ini             # Конфигурация Alembic
 ├── .env.example            # Пример переменных окружения
 ├── .env                    # Переменные окружения (не в git)
+├── .editorconfig           # Стиль кода (LF, indent 4)
+├── .gitattributes          # Нормализация line endings
 ├── .gitignore              # Игнорируемые файлы
 └── README.md               # Описание проекта
 ```
@@ -35,12 +37,16 @@ pid_pipeline/
 ```
 app/
 ├── __init__.py             # Версия приложения
-├── main.py                 # FastAPI app, роутеры, middleware
+├── main.py                 # FastAPI app, роутеры, middleware, health check
 ├── config.py               # Настройки из .env
+│
+├── core/                   # Shared utilities
+│   ├── __init__.py
+│   └── logging.py          # ColoredFormatter, setup_logging, get_logger
 │
 ├── api/                    # REST API endpoints
 │   ├── __init__.py
-│   ├── diagrams.py         # CRUD диаграмм (/api/diagrams)
+│   ├── diagrams.py         # CRUD диаграмм + upload + download (/api/diagrams)
 │   ├── detection.py        # Детекция (/api/detection)
 │   ├── cvat.py             # CVAT интеграция (/api/cvat)
 │   ├── segmentation.py     # Сегментация (/api/segmentation)
@@ -61,7 +67,10 @@ app/
 │
 ├── services/               # Бизнес-логика
 │   ├── __init__.py
-│   └── storage.py          # StorageService — работа с файлами
+│   ├── cvat_client.py      # CVATClient singleton + connection pooling
+│   ├── cvat_export.py      # Экспорт аннотаций из CVAT (YOLO/COCO)
+│   ├── storage.py          # StorageService — работа с файлами
+│   └── project_loader.py   # Загрузка конфигов проектов из YAML
 │
 └── db/                     # База данных
     ├── __init__.py
@@ -127,37 +136,27 @@ modules/
 ```
 ui/
 ├── __init__.py
-├── main.py                 # Entry point
-├── app.py                  # QApplication
+├── main.py                 # Entry point (python -m ui.main)
 │
 ├── windows/                # Главные окна
 │   ├── __init__.py
-│   ├── main_window.py      # Главное окно, список диаграмм
-│   └── diagram_window.py   # Окно диаграммы, этапы обработки
+│   ├── main_window.py      # Координатор: toolbar, statusbar, QTabWidget (287 строк)
+│   └── cvat_window.py      # Встроенный CVAT WebView (QWebEngineView)
 │
 ├── widgets/                # Переиспользуемые виджеты
 │   ├── __init__.py
-│   ├── diagram_list.py     # Таблица диаграмм
-│   ├── stage_progress.py   # Индикатор прогресса
-│   ├── cvat_browser.py     # Встроенный CVAT
-│   └── action_buttons.py   # Кнопки действий
+│   ├── diagram_list.py     # Таблица диаграмм + фильтры + действия (611 строк)
+│   └── upload_dialog.py    # Диалог загрузки новой диаграммы
 │
-├── editors/                # Редакторы валидации
-│   ├── __init__.py
-│   ├── base_editor.py      # Базовый класс
-│   ├── mask_editor.py      # Редактор масок (квадраты)
-│   ├── polyline_editor.py  # Редактор полилиний
-│   └── graph_editor.py     # Редактор графа
+├── editors/                # Редакторы валидации (Phase 4+)
+│   └── __init__.py
 │
 ├── services/               # Сервисы UI
 │   ├── __init__.py
-│   ├── api_client.py       # HTTP клиент к FastAPI
-│   ├── status_provider.py  # Абстракция обновления статуса
-│   ├── polling_provider.py # HTTP polling реализация
-│   └── websocket_provider.py # WebSocket (будущее)
+│   ├── api_client.py       # HTTP клиент (persistent connection, retry)
+│   └── status_provider.py  # HTTP polling каждые 2 сек
 │
 └── resources/              # Ресурсы
-    ├── styles.qss          # Qt стили
     └── icons/              # Иконки
 ```
 

@@ -5,6 +5,10 @@
 venv/
 env/
 
+#Docs
+PLAN.md
+PROGRESS.md
+
 # Python
 __pycache__/
 *.py[cod]

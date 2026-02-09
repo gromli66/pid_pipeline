@@ -1,0 +1,48 @@
+    def export_annotations(
+        self,
+        task_id: int,
+        format_name: str = "COCO 1.0",
+        output_path: Optional[Path] = None,
+    ) -> Path:
+        """
+        кспортировать аннотации из task.
+        CVAT API: GET /api/tasks/{id}/dataset?format=...&action=download
+        """
+        with httpx.Client(timeout=self.timeout * 5) as client:
+            # дём готовности и скачиваем (только GET)
+            max_attempts = 60
+            for attempt in range(max_attempts):
+                headers = self._get_headers(for_download=True)
+                
+                response = client.get(
+                    f"{self.base_url}/api/tasks/{task_id}/dataset",
+                    headers=headers,
+                    params={"format": format_name, "action": "download"},
+                    follow_redirects=True,
+                )
+                
+                if response.status_code == 200:
+                    content_type = response.headers.get("content-type", "")
+                    if "application/zip" in content_type or "application/octet-stream" in content_type or len(response.content) > 100:
+                        break
+                elif response.status_code == 202:
+                    time.sleep(2)
+                    continue
+                else:
+                    raise Exception(f"Export failed: {response.status_code} {response.text}")
+                
+                time.sleep(2)
+            else:
+                raise TimeoutError(f"Export not ready after {max_attempts} attempts")
+            
+            if len(response.content) < 50:
+                raise Exception(f"Export returned empty or too small: {len(response.content)} bytes")
+            
+            if output_path is None:
+                output_path = Path(f"task_{task_id}_annotations.zip")
+            
+            output_path = Path(output_path)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(response.content)
+            
+            return output_path
