@@ -214,9 +214,97 @@ python -m venv .venv
 .venv\Scripts\activate
 ```
 
+<<<<<<< HEAD
 ### Шаг 2: Установить PyTorch с CUDA
+=======
+### Шаг 5: Установить PyTorch с CUDA
 
-**⚠️ ВАЖНО: PyTorch устанавливается ОТДЕЛЬНО!**
+** ВАЖНО: PyTorch устанавливается ОТДЕЛЬНО, до остальных зависимостей!**
+
+```powershell
+# PyTorch 2.6.0 + CUDA 12.4
+pip install torch==2.6.0 torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cu124
+```
+
+Проверить:
+```powershell
+python -c "import torch; print(f'PyTorch: {torch.__version__}'); print(f'CUDA available: {torch.cuda.is_available()}')"
+```
+
+Ожидаемый вывод:
+```
+PyTorch: 2.6.0+cu124
+CUDA available: True
+```
+
+### Шаг 6: Установить остальные зависимости
+
+```powershell
+# Для API разработки
+pip install -r requirements/api.txt
+
+# Для Worker (ML задачи) — если запускаете локально
+pip install -r requirements/worker.txt
+
+# Для UI (PySide6)
+pip install -r requirements/ui.txt
+```
+
+### Шаг 7: Запустить инфраструктуру
+
+```powershell
+docker-compose up -d postgres redis
+```
+
+### Шаг 8: Инициализировать БД
+
+```powershell
+python scripts/init_db.py
+```
+
+### Шаг 9: Проверить запуск API
+
+```powershell
+uvicorn app.main:app --reload --port 8000
+```
+
+Открыть: http://localhost:8000/docs
+
+---
+
+## 3.4 Установка на Linux (Ubuntu)
+
+### Шаг 1: Клонирование
+
+```bash
+git clone <repository-url>
+cd pid_pipeline
+```
+
+### Шаг 2: Настройка .env
+
+```bash
+cp .env.example .env
+nano .env
+```
+
+Изменить:
+```env
+DB_PASSWORD=your_secure_password
+CVAT_TOKEN=your_cvat_token
+```
+
+### Шаг 3: Создать виртуальное окружение
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+```
+
+### Шаг 4: Установить PyTorch с CUDA
+>>>>>>> 90fdd883de8a8d9391f08e933a05b42a252eed65
+
+** ВАЖНО: PyTorch устанавливается ОТДЕЛЬНО!**
 
 ```powershell
 pip install torch==2.6.0 torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cu124

@@ -13,6 +13,10 @@
 
 ## Структура проекта
 
+<<<<<<< HEAD
+=======
+## Структура проекта
+>>>>>>> 90fdd883de8a8d9391f08e933a05b42a252eed65
 ```
 pid_pipeline/
 ├── app/                    # FastAPI Backend
@@ -41,7 +45,11 @@ pid_pipeline/
 └── .env                    # Конфигурация
 ```
 
+<<<<<<< HEAD
 ## Быстрый старт
+=======
+## Запуск
+>>>>>>> 90fdd883de8a8d9391f08e933a05b42a252eed65
 
 ### 1. Клонирование и настройка
 
@@ -106,7 +114,11 @@ Desktop-приложение на PySide6 для управления пайпл
 python -m ui.main
 ```
 
+<<<<<<< HEAD
 ### Возможности
+=======
+## API Документация
+>>>>>>> 90fdd883de8a8d9391f08e933a05b42a252eed65
 
 - Загрузка P&ID диаграмм с выбором проекта
 - Запуск YOLO детекции одной кнопкой
@@ -116,7 +128,11 @@ python -m ui.main
 - Фильтры по проекту, статусу, поиск по имени файла
 - Обработка ошибок: retry, перезагрузка оригинала
 
+<<<<<<< HEAD
 ### Архитектура UI
+=======
+## Разработка
+>>>>>>> 90fdd883de8a8d9391f08e933a05b42a252eed65
 
 ```
 MainWindow (координатор, 287 строк)
@@ -137,6 +153,7 @@ Services:
 ### Основные endpoints
 
 ```bash
+<<<<<<< HEAD
 # Загрузка диаграммы
 curl -X POST "http://localhost:8000/api/diagrams/upload" \
   -F "file=@diagram.png" \
@@ -232,3 +249,8 @@ uploaded → detecting → detected → validating_bbox → validated_bbox
 | `CVAT_SUPERUSER_PASSWORD` | Пароль CVAT | `admin123` |
 | `YOLO_DEVICE` | Устройство для YOLO | `cuda` |
 | `LOG_LEVEL` | Уровень логирования | `INFO` |
+=======
+pip install -r requirements/worker.txt
+celery -A worker.celery_app worker --loglevel=info
+```
+>>>>>>> 90fdd883de8a8d9391f08e933a05b42a252eed65
