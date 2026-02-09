@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Импортируем модели
 from app.db.base import Base
-from app.models import Diagram, Artifact, ProcessingStage
+from app.models import Diagram, Artifact, ProcessingStage, Project
 
 # this is the Alembic Config object
 config = context.config

@@ -21,7 +21,7 @@ httpx>=0.26.0
 tenacity>=8.2.0
 
 # Logging
-structlog>=24.1.0
+# используем стандартный logging
 
 # Image processing
 Pillow>=10.2.0

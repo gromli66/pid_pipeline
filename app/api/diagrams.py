@@ -2,11 +2,13 @@
 Diagrams API - CRUD операции с диаграммами.
 """
 
-from typing import Optional
 from uuid import UUID
+from pathlib import Path
+from typing import Optional
+import re
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query, Form
-from sqlalchemy import select, func
+from sqlalchemy import select, func, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_async_db
@@ -21,6 +23,19 @@ from app.services.storage import StorageService
 from app.services.project_loader import get_project_loader, ProjectLoader
 
 router = APIRouter()
+
+MAX_FILE_SIZE = 200 * 1024 * 1024  # 200MB
+
+
+def sanitize_filename(filename: str) -> str:
+    """Очистить имя файла от опасных символов (path traversal, спецсимволы)."""
+    # Убрать path traversal
+    filename = filename.replace("\\", "/").split("/")[-1]
+    # Убрать спецсимволы, оставить буквы, цифры, пробелы, -, _, .
+    filename = re.sub(r'[^\w\s\-\.]', '', filename)
+    # Убрать множественные точки (защита от ..)
+    filename = re.sub(r'\.{2,}', '.', filename)
+    return filename.strip() or "unnamed"
 
 
 @router.post("/upload", response_model=DiagramUploadResponse)
@@ -59,7 +74,19 @@ async def upload_diagram(
     if file.content_type not in allowed_types:
         raise HTTPException(status_code=400, detail=f"Invalid file type. Allowed: {allowed_types}")
     
-    # Следующий номер
+    # Проверка размера файла (чанками, без загрузки всего в RAM)
+    size = 0
+    while chunk := await file.read(1024 * 1024):  # 1MB чанки
+        size += len(chunk)
+        if size > MAX_FILE_SIZE:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File too large. Maximum: {MAX_FILE_SIZE // (1024 * 1024)}MB"
+            )
+    await file.seek(0)  # Сбрасываем позицию для дальнейшего чтения
+    
+    # Следующий номер (advisory lock предотвращает race condition при параллельных uploads)
+    await db.execute(text("SELECT pg_advisory_xact_lock(1)"))
     result = await db.execute(select(func.max(Diagram.number)))
     max_number = result.scalar() or 0
     
@@ -67,7 +94,7 @@ async def upload_diagram(
     diagram = Diagram(
         number=max_number + 1,
         project_code=project_code,
-        original_filename=file.filename,
+        original_filename=sanitize_filename(file.filename or "unnamed"),
         status=DiagramStatus.UPLOADED,
     )
     db.add(diagram)
@@ -175,6 +202,67 @@ async def get_diagram_status(uid: UUID, db: AsyncSession = Depends(get_async_db)
     )
 
 
+@router.get("/{uid}/download/{artifact_type}")
+async def download_artifact(
+    uid: UUID,
+    artifact_type: str,
+    db: AsyncSession = Depends(get_async_db),
+):
+    """
+    Скачать артефакт диаграммы.
+
+    artifact_type: original_image, yolo_predicted, yolo_validated, coco_validated
+    """
+    from fastapi.responses import FileResponse
+    from app.config import settings
+
+    # Проверяем диаграмму
+    result = await db.execute(select(Diagram).where(Diagram.uid == uid))
+    diagram = result.scalar_one_or_none()
+    if not diagram:
+        raise HTTPException(status_code=404, detail="Diagram not found")
+
+    # Валидация типа артефакта
+    try:
+        art_type = ArtifactType(artifact_type)
+    except ValueError:
+        valid_types = [t.value for t in ArtifactType]
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid artifact type. Valid: {valid_types}"
+        )
+
+    # Ищем артефакт
+    result = await db.execute(
+        select(Artifact).where(
+            Artifact.diagram_uid == uid,
+            Artifact.artifact_type == art_type,
+        )
+    )
+    artifact = result.scalar_one_or_none()
+    if not artifact:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Artifact '{artifact_type}' not found for diagram {uid}"
+        )
+
+    # Собираем полный путь
+    storage_path = Path(settings.STORAGE_PATH)
+    file_path = storage_path / artifact.file_path
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="File not found on disk")
+
+    # Имя файла для скачивания
+    suffix = file_path.suffix
+    download_name = f"{diagram.original_filename}_{artifact_type}{suffix}"
+
+    return FileResponse(
+        path=file_path,
+        filename=download_name,
+        media_type="application/octet-stream",
+    )
+
+
 @router.delete("/{uid}")
 async def delete_diagram(uid: UUID, db: AsyncSession = Depends(get_async_db)):
     """Удалить диаграмму."""
@@ -191,3 +279,98 @@ async def delete_diagram(uid: UUID, db: AsyncSession = Depends(get_async_db)):
     await db.commit()
     
     return {"status": "deleted", "uid": str(uid)}
+
+
+@router.post("/{uid}/retry")
+async def retry_operation(
+        uid: UUID,
+        db: AsyncSession = Depends(get_async_db),
+):
+    """
+    Повторить операцию после ошибки.
+    Сбрасывает статус на предыдущий шаг в зависимости от error_stage.
+    """
+    result = await db.execute(select(Diagram).where(Diagram.uid == uid))
+    diagram = result.scalar_one_or_none()
+
+    if not diagram:
+        raise HTTPException(status_code=404, detail="Diagram not found")
+
+    if diagram.status != DiagramStatus.ERROR:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot retry: status is '{diagram.status.value}', expected 'error'"
+        )
+
+    # Маппинг error_stage → предыдущий статус
+    stage_to_status = {
+        "detecting": DiagramStatus.UPLOADED,
+        "creating_cvat_task": DiagramStatus.DETECTED,
+        "fetching_annotations": DiagramStatus.VALIDATING_BBOX,
+        "segmenting": DiagramStatus.VALIDATED_BBOX,
+        "skeletonizing": DiagramStatus.SEGMENTED,
+        "classifying": DiagramStatus.SKELETONIZED,
+        "building_graph": DiagramStatus.CLASSIFIED,
+    }
+
+    new_status = stage_to_status.get(diagram.error_stage, DiagramStatus.UPLOADED)
+
+    diagram.status = new_status
+    diagram.error_message = None
+    diagram.error_stage = None
+
+    await db.commit()
+
+    return {
+        "status": new_status.value,
+        "message": f"Status reset to {new_status.value}",
+    }
+
+
+@router.post("/{uid}/reupload-original")
+async def reupload_original(
+        uid: UUID,
+        file: UploadFile = File(...),
+        db: AsyncSession = Depends(get_async_db),
+):
+    """Перезагрузить оригинальное изображение."""
+    result = await db.execute(select(Diagram).where(Diagram.uid == uid))
+    diagram = result.scalar_one_or_none()
+
+    if not diagram:
+        raise HTTPException(status_code=404, detail="Diagram not found")
+
+    # Проверка типа файла
+    allowed_types = {"image/png", "image/jpeg", "image/tiff"}
+    if file.content_type not in allowed_types:
+        raise HTTPException(status_code=400, detail=f"Invalid file type. Allowed: {allowed_types}")
+
+    # Проверка размера файла (чанками, без загрузки всего в RAM)
+    size = 0
+    while chunk := await file.read(1024 * 1024):
+        size += len(chunk)
+        if size > MAX_FILE_SIZE:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File too large. Maximum: {MAX_FILE_SIZE // (1024 * 1024)}MB"
+            )
+    await file.seek(0)
+
+    # Сохраняем файл
+    storage = StorageService()
+    file_path, file_size, dimensions = await storage.save_upload(diagram.uid, file, "original")
+
+    diagram.image_width = dimensions[0] if dimensions else None
+    diagram.image_height = dimensions[1] if dimensions else None
+
+    # Сбрасываем статус на UPLOADED
+    diagram.status = DiagramStatus.UPLOADED
+    diagram.error_message = None
+    diagram.error_stage = None
+
+    await db.commit()
+
+    return {
+        "status": "uploaded",
+        "message": "Original image reuploaded successfully",
+    }

@@ -38,11 +38,12 @@ async def start_detection(
             detail=f"Cannot start detection: status is '{diagram.status.value}', expected 'uploaded'"
         )
     
-    # Обновляем статус
+    # Обновляем статус ПЕРЕД запуском task (короткая транзакция)
+    # ⚠️ НЕ оборачивать Celery send_task в ту же транзакцию!
     diagram.status = DiagramStatus.DETECTING
     await db.commit()
     
-    # Запускаем Celery task
+    # Запускаем Celery task ВНЕ транзакции
     from worker.celery_app import celery_app
     task = celery_app.send_task(
         "worker.tasks.detection.task_detect_yolo",

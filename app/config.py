@@ -30,6 +30,10 @@ class Settings(BaseSettings):
     
     # CVAT
     CVAT_URL: str = Field(default="http://localhost:8080")
+    CVAT_BROWSER_URL: str = Field(
+        default="http://localhost:8080",
+        description="URL для открытия CVAT в браузере пользователя"
+    )
     CVAT_TOKEN: Optional[str] = Field(default=None)
     
     # Storage
@@ -43,8 +47,8 @@ class Settings(BaseSettings):
     API_PORT: int = Field(default=8000)
     DEBUG: bool = Field(default=False)
     
-    # Logging
-    LOG_LEVEL: str = Field(default="INFO")
+    # Logging (DEBUG по умолчанию, переключается на INFO через .env)
+    LOG_LEVEL: str = Field(default="DEBUG")
 
 
 @lru_cache()

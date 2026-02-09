@@ -2,11 +2,11 @@
 CVAT API - интеграция с CVAT.
 """
 
+import asyncio
 import json
 import os
 import tempfile
 import zipfile
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import List, Dict, Tuple
 from uuid import UUID
@@ -21,8 +21,10 @@ from app.config import settings
 
 router = APIRouter()
 
-# Thread pool для синхронных операций с CVAT
-_executor = ThreadPoolExecutor(max_workers=4)
+
+def _get_cvat_browser_url() -> str:
+    """Получить URL CVAT для браузера пользователя."""
+    return getattr(settings, 'CVAT_BROWSER_URL', None) or settings.CVAT_URL
 
 
 def parse_coco_annotations(coco_json: dict) -> Tuple[List[Dict], Dict[int, str]]:
@@ -100,15 +102,11 @@ def _fetch_cvat_annotations_sync(
     Returns:
         Tuple (coco_path, yolo_path, annotation_count)
     """
-    from app.services.cvat_client import CVATClient
+    from app.services.cvat_client import get_cvat_client
     
-    cvat_client = CVATClient()
+    cvat_client = get_cvat_client()
     
-    # Авторизация если нужно
-    cvat_username = os.getenv("CVAT_USERNAME")
-    cvat_password = os.getenv("CVAT_PASSWORD")
-    if cvat_username and cvat_password:
-        cvat_client.login(cvat_username, cvat_password)
+    # Авторизация через CVAT_TOKEN (настроено в settings)
     
     # Экспортируем аннотации в COCO формате
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -190,8 +188,9 @@ async def open_cvat_validation(
     diagram.status = DiagramStatus.VALIDATING_BBOX
     await db.commit()
     
-    # Формируем URL
-    cvat_url = f"{settings.CVAT_URL}/tasks/{diagram.cvat_task_id}/jobs/{diagram.cvat_job_id}"
+    # Формируем URL для браузера
+    browser_url = _get_cvat_browser_url()
+    cvat_url = f"{browser_url}/tasks/{diagram.cvat_task_id}/jobs/{diagram.cvat_job_id}"
     
     return {
         "status": "validating_bbox",
@@ -239,17 +238,15 @@ async def fetch_cvat_annotations(
     detection_dir = storage_path / str(diagram.uid) / "detection"
     
     try:
-        # Выполняем синхронную операцию в thread pool
-        import asyncio
-        loop = asyncio.get_event_loop()
-        
-        coco_path, yolo_path, annotation_count = await loop.run_in_executor(
-            _executor,
+        # Долгая операция ВНЕ транзакции (может занять минуты)
+        # ⚠️ НЕ оборачивать в db.begin() — это заблокирует БД!
+        coco_path, yolo_path, annotation_count = await asyncio.to_thread(
             _fetch_cvat_annotations_sync,
             diagram.cvat_task_id,
             detection_dir,
         )
         
+        # Быстрые DB writes после долгой операции (неявная транзакция)
         # Создаём артефакт COCO_VALIDATED
         artifact_coco = Artifact(
             diagram_uid=str(uid),
@@ -310,7 +307,8 @@ async def get_cvat_url(
     if not diagram.cvat_task_id:
         raise HTTPException(status_code=400, detail="CVAT task not created")
     
-    cvat_url = f"{settings.CVAT_URL}/tasks/{diagram.cvat_task_id}/jobs/{diagram.cvat_job_id}"
+    browser_url = _get_cvat_browser_url()
+    cvat_url = f"{browser_url}/tasks/{diagram.cvat_task_id}/jobs/{diagram.cvat_job_id}"
     
     return {"cvat_url": cvat_url}
 
@@ -350,3 +348,138 @@ async def retry_fetch_annotations(
         "status": "validating_bbox",
         "message": "Ready for retry. Call fetch-annotations again.",
     }
+
+
+def _create_cvat_task_sync(diagram, project_config, image_path: Path, yolo_path: Path):
+    """Синхронное создание CVAT task."""
+    from app.services.cvat_client import get_cvat_client, CVATLabel
+    from app.services.cvat_export import create_exporter_from_config, Detection
+
+    cvat_client = get_cvat_client()
+
+    # Labels из конфига
+    labels = [CVATLabel(name=cls.name) for cls in project_config.classes]
+
+    # Получаем или создаём проект
+    project_id = cvat_client.get_or_create_project(
+        name=project_config.cvat_project_name,
+        labels=labels,
+    )
+
+    # Создаём task
+    task_name = f"Diagram #{diagram.number} - {diagram.original_filename}"
+    cvat_task_id, cvat_job_id = cvat_client.create_task(
+        project_id=project_id,
+        name=task_name,
+        image_path=image_path,
+    )
+
+    # Импортируем аннотации если есть
+    if yolo_path.exists():
+        yolo_content = yolo_path.read_text().strip()
+        if yolo_content:
+            detections = []
+            for line in yolo_content.split("\n"):
+                parts = line.strip().split()
+                if len(parts) >= 5:
+                    detections.append(Detection(
+                        class_id=int(parts[0]),
+                        x_center=float(parts[1]),
+                        y_center=float(parts[2]),
+                        width=float(parts[3]),
+                        height=float(parts[4]),
+                        confidence=float(parts[5]) if len(parts) > 5 else 1.0,
+                    ))
+
+            if detections:
+                exporter = create_exporter_from_config(project_config)
+
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    zip_path = Path(temp_dir) / "annotations.zip"
+                    exporter.export_yolo(
+                        detections=detections,
+                        image_filename=image_path.name,
+                        output_path=zip_path,
+                    )
+
+                    cvat_client.import_annotations(
+                        task_id=cvat_task_id,
+                        annotations_path=zip_path,
+                        format_name="YOLO 1.1",
+                    )
+
+    return cvat_task_id, cvat_job_id
+
+
+@router.post("/{uid}/create-task")
+async def create_cvat_task_endpoint(
+        uid: UUID,
+        db: AsyncSession = Depends(get_async_db),
+):
+    """Создать CVAT task для диаграммы."""
+    from app.services.project_loader import get_project_loader
+    import asyncio
+
+    result = await db.execute(select(Diagram).where(Diagram.uid == uid))
+    diagram = result.scalar_one_or_none()
+
+    if not diagram:
+        raise HTTPException(status_code=404, detail="Diagram not found")
+
+    if diagram.cvat_task_id:
+        # Уже есть
+        browser_url = _get_cvat_browser_url()
+        return {
+            "status": "exists",
+            "cvat_task_id": diagram.cvat_task_id,
+            "cvat_job_id": diagram.cvat_job_id,
+            "cvat_url": f"{browser_url}/tasks/{diagram.cvat_task_id}/jobs/{diagram.cvat_job_id}",
+        }
+
+    # Загружаем конфиг проекта
+    project_loader = get_project_loader()
+    project_config = project_loader.load(diagram.project_code)
+    if not project_config:
+        raise HTTPException(status_code=400, detail=f"Project config not found: {diagram.project_code}")
+
+    storage_path = Path(settings.STORAGE_PATH)
+
+    # Путь к изображению
+    image_path = storage_path / str(diagram.uid) / "original" / "image.png"
+    if not image_path.exists():
+        for ext in [".jpg", ".jpeg", ".tiff", ".tif"]:
+            alt_path = image_path.with_suffix(ext)
+            if alt_path.exists():
+                image_path = alt_path
+                break
+        else:
+            raise HTTPException(status_code=400, detail="Original image not found")
+
+    # Путь к YOLO predictions
+    yolo_path = storage_path / str(diagram.uid) / "detection" / "yolo_predicted.txt"
+
+    try:
+        cvat_task_id, cvat_job_id = await asyncio.to_thread(
+            _create_cvat_task_sync,
+            diagram,
+            project_config,
+            image_path,
+            yolo_path,
+        )
+
+        diagram.cvat_task_id = cvat_task_id
+        diagram.cvat_job_id = cvat_job_id
+
+        await db.commit()
+
+        browser_url = _get_cvat_browser_url()
+
+        return {
+            "status": "created",
+            "cvat_task_id": cvat_task_id,
+            "cvat_job_id": cvat_job_id,
+            "cvat_url": f"{browser_url}/tasks/{cvat_task_id}/jobs/{cvat_job_id}",
+        }
+
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to create CVAT task: {exc}")

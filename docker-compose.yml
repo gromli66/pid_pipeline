@@ -1,9 +1,25 @@
-version: '3.8'
+# =============================================================================
+# P&ID Pipeline + CVAT - Unified Docker Compose
+# =============================================================================
+#
+# Запуск:
+#   docker-compose up -d
+#
+# Создание суперпользователя CVAT:
+#   docker exec -it cvat_server bash -ic 'python3 ~/manage.py createsuperuser'
+#
+# Доступ:
+#   - P&ID API: http://localhost:8000/docs
+#   - CVAT UI:  http://localhost:8080
+#
+# =============================================================================
 
 services:
   # ===========================================================================
-  # PostgreSQL - База данных
+  # P&ID Pipeline Services
   # ===========================================================================
+
+  # PostgreSQL - База данных P&ID Pipeline
   postgres:
     image: postgres:15-alpine
     container_name: pid_postgres
@@ -25,9 +41,7 @@ services:
     networks:
       - pid_network
 
-  # ===========================================================================
-  # Redis - Message Broker для Celery
-  # ===========================================================================
+  # Redis - Message Broker для Celery (P&ID)
   redis:
     image: redis:7-alpine
     container_name: pid_redis
@@ -45,9 +59,7 @@ services:
     networks:
       - pid_network
 
-  # ===========================================================================
   # FastAPI - Backend API
-  # ===========================================================================
   api:
     build:
       context: .
@@ -57,16 +69,21 @@ services:
       - DATABASE_URL=postgresql://${DB_USER:-pid_user}:${DB_PASSWORD:-changeme}@postgres:5432/${DB_NAME:-pid_pipeline}
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
-      - CVAT_URL=${CVAT_URL:-http://host.docker.internal:8080}
-      - CVAT_TOKEN=${CVAT_TOKEN}
-      - CVAT_PROJECT_ID=${CVAT_PROJECT_ID:-1}
+      - CVAT_URL=http://cvat_server:8080
+      - CVAT_USERNAME=${CVAT_SUPERUSER:-admin}
+      - CVAT_PASSWORD=${CVAT_SUPERUSER_PASSWORD:-admin123}
+      - CVAT_TOKEN=${CVAT_TOKEN:-52db370470e5ed7ab05fecae5cc716859271c3d3}
       - STORAGE_PATH=/storage/diagrams
+      - PROJECTS_CONFIG_DIR=/app/configs/projects
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     volumes:
       - ./app:/app/app
       - ./worker:/app/worker
       - ./configs:/app/configs
-      - storage_data:/storage
+      - ./storage:/storage
+      - ./alembic:/app/alembic
+      - ./alembic.ini:/app/alembic.ini
+      - cvat_data:/home/django/data:ro
     ports:
       - "${API_PORT:-8000}:8000"
     depends_on:
@@ -77,10 +94,9 @@ services:
     restart: unless-stopped
     networks:
       - pid_network
+      - cvat
 
-  # ===========================================================================
   # Celery Worker - GPU задачи
-  # ===========================================================================
   worker:
     build:
       context: .
@@ -90,20 +106,23 @@ services:
       - DATABASE_URL=postgresql://${DB_USER:-pid_user}:${DB_PASSWORD:-changeme}@postgres:5432/${DB_NAME:-pid_pipeline}
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
-      - CVAT_URL=${CVAT_URL:-http://host.docker.internal:8080}
-      - CVAT_TOKEN=${CVAT_TOKEN}
+      - CVAT_URL=http://cvat_server:8080
+      - CVAT_USERNAME=${CVAT_SUPERUSER:-admin}
+      - CVAT_PASSWORD=${CVAT_SUPERUSER_PASSWORD:-admin123}
+      - CVAT_TOKEN=52db370470e5ed7ab05fecae5cc716859271c3d3
       - STORAGE_PATH=/storage/diagrams
+      - PROJECTS_CONFIG_DIR=/app/configs/projects
       - YOLO_WEIGHTS=${YOLO_WEIGHTS:-/models/yolo/best.pt}
-      - U2NET_WEIGHTS=${U2NET_WEIGHTS:-/models/u2net/best.pth}
-      - JUNCTION_WEIGHTS=${JUNCTION_WEIGHTS:-/models/junction/best.pth}
+      - YOLO_DEVICE=${YOLO_DEVICE:-cuda}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     volumes:
       - ./worker:/app/worker
       - ./modules:/app/modules
-      - ./app:/app/app
-      - storage_data:/storage
-      - ./models:/models
       - ./configs:/app/configs
+      - ./app:/app/app
+      - ./storage:/storage
+      - ./models:/models:ro
+      - cvat_data:/home/django/data
     depends_on:
       postgres:
         condition: service_healthy
@@ -112,6 +131,7 @@ services:
     restart: unless-stopped
     networks:
       - pid_network
+      - cvat
     deploy:
       resources:
         reservations:
@@ -120,17 +140,276 @@ services:
               count: 1
               capabilities: [gpu]
 
+  # ===========================================================================
+  # CVAT Services
+  # ===========================================================================
+
+  # CVAT PostgreSQL
+  cvat_db:
+    image: postgres:15-alpine
+    container_name: cvat_db
+    environment:
+      POSTGRES_USER: root
+      POSTGRES_DB: cvat
+      POSTGRES_HOST_AUTH_METHOD: trust
+    volumes:
+      - cvat_db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U root -d cvat"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - cvat
+
+  # CVAT Redis (in-memory)
+  cvat_redis_inmem:
+    image: redis:7.2-alpine
+    container_name: cvat_redis_inmem
+    command: >
+      redis-server
+      --save 60 100
+      --appendonly yes
+    volumes:
+      - cvat_redis_inmem:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - cvat
+
+  # CVAT Redis (on-disk) - Kvrocks
+  cvat_redis_ondisk:
+    image: apache/kvrocks:latest
+    container_name: cvat_redis_ondisk
+    init: true
+    volumes:
+      - cvat_redis_ondisk:/var/lib/kvrocks/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "6666", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - cvat
+
+  # CVAT Server
+  cvat_server:
+    image: cvat/server:v2.25.0
+    container_name: cvat_server
+    command: init run server
+    environment:
+      CVAT_POSTGRES_HOST: cvat_db
+      CVAT_REDIS_INMEM_HOST: cvat_redis_inmem
+      CVAT_REDIS_INMEM_PORT: 6379
+      CVAT_REDIS_ONDISK_HOST: cvat_redis_ondisk
+      CVAT_REDIS_ONDISK_PORT: 6666
+      DJANGO_MODWSGI_EXTRA_ARGS: ""
+      ALLOWED_HOSTS: "*"
+      CVAT_SERVERLESS_ENABLED: "false"
+      SMOKESCREEN_OPTS: ""
+    volumes:
+      - cvat_data:/home/django/data
+      - cvat_keys:/home/django/keys
+      - cvat_logs:/home/django/logs
+    depends_on:
+      cvat_db:
+        condition: service_healthy
+      cvat_redis_inmem:
+        condition: service_healthy
+      cvat_redis_ondisk:
+        condition: service_healthy
+      cvat_opa:
+        condition: service_started
+    labels:
+      - traefik.enable=true
+      - traefik.http.services.cvat.loadbalancer.server.port=8080
+      - traefik.http.routers.cvat.rule=Host(`${CVAT_HOST:-localhost}`) && PathPrefix(`/api/`, `/static/`, `/admin`, `/documentation/`, `/django-rq`)
+      - traefik.http.routers.cvat.entrypoints=web
+    restart: unless-stopped
+    networks:
+      cvat:
+        aliases:
+          - cvat-server
+
+  # CVAT Worker - Import
+  cvat_worker_import:
+    image: cvat/server:v2.25.0
+    container_name: cvat_worker_import
+    command: run worker.import
+    environment:
+      CVAT_POSTGRES_HOST: cvat_db
+      CVAT_REDIS_INMEM_HOST: cvat_redis_inmem
+      CVAT_REDIS_INMEM_PORT: 6379
+      CVAT_REDIS_ONDISK_HOST: cvat_redis_ondisk
+      CVAT_REDIS_ONDISK_PORT: 6666
+      SMOKESCREEN_OPTS: ""
+    volumes:
+      - cvat_data:/home/django/data
+      - cvat_keys:/home/django/keys
+      - cvat_logs:/home/django/logs
+    depends_on:
+      - cvat_server
+    restart: unless-stopped
+    networks:
+      - cvat
+
+  # CVAT Worker - Export
+  cvat_worker_export:
+    image: cvat/server:v2.25.0
+    container_name: cvat_worker_export
+    command: run worker.export
+    environment:
+      CVAT_POSTGRES_HOST: cvat_db
+      CVAT_REDIS_INMEM_HOST: cvat_redis_inmem
+      CVAT_REDIS_INMEM_PORT: 6379
+      CVAT_REDIS_ONDISK_HOST: cvat_redis_ondisk
+      CVAT_REDIS_ONDISK_PORT: 6666
+      SMOKESCREEN_OPTS: ""
+    volumes:
+      - cvat_data:/home/django/data
+      - cvat_keys:/home/django/keys
+      - cvat_logs:/home/django/logs
+    depends_on:
+      - cvat_server
+    restart: unless-stopped
+    networks:
+      - cvat
+
+  # CVAT Worker - Annotation
+  cvat_worker_annotation:
+    image: cvat/server:v2.25.0
+    container_name: cvat_worker_annotation
+    command: run worker.annotation
+    environment:
+      CVAT_POSTGRES_HOST: cvat_db
+      CVAT_REDIS_INMEM_HOST: cvat_redis_inmem
+      CVAT_REDIS_INMEM_PORT: 6379
+      CVAT_REDIS_ONDISK_HOST: cvat_redis_ondisk
+      CVAT_REDIS_ONDISK_PORT: 6666
+      SMOKESCREEN_OPTS: ""
+    volumes:
+      - cvat_data:/home/django/data
+      - cvat_keys:/home/django/keys
+      - cvat_logs:/home/django/logs
+    depends_on:
+      - cvat_server
+    restart: unless-stopped
+    networks:
+      - cvat
+
+  # CVAT Worker - Chunks (для обработки изображений)
+  cvat_worker_chunks:
+    image: cvat/server:v2.25.0
+    container_name: cvat_worker_chunks
+    command: run worker.chunks
+    environment:
+      CVAT_POSTGRES_HOST: cvat_db
+      CVAT_REDIS_INMEM_HOST: cvat_redis_inmem
+      CVAT_REDIS_INMEM_PORT: 6379
+      CVAT_REDIS_ONDISK_HOST: cvat_redis_ondisk
+      CVAT_REDIS_ONDISK_PORT: 6666
+      SMOKESCREEN_OPTS: ""
+    volumes:
+      - cvat_data:/home/django/data
+      - cvat_keys:/home/django/keys
+      - cvat_logs:/home/django/logs
+    depends_on:
+      - cvat_server
+    restart: unless-stopped
+    networks:
+      - cvat
+
+  # CVAT UI
+  cvat_ui:
+    image: cvat/ui:v2.25.0
+    container_name: cvat_ui
+    depends_on:
+      - cvat_server
+    labels:
+      - traefik.enable=true
+      - traefik.http.services.cvat-ui.loadbalancer.server.port=80
+      - traefik.http.routers.cvat-ui.rule=Host(`${CVAT_HOST:-localhost}`)
+      - traefik.http.routers.cvat-ui.entrypoints=web
+    restart: unless-stopped
+    networks:
+      - cvat
+
+  # CVAT OPA (Open Policy Agent)
+  cvat_opa:
+    container_name: cvat_opa
+    image: openpolicyagent/opa:0.63.0
+    restart: unless-stopped
+    networks:
+      cvat:
+        aliases:
+          - opa
+    command:
+      - run
+      - --server
+      - --log-level=error
+      - --set=services.cvat.url=http://cvat-server:8080
+      - --set=bundles.cvat.service=cvat
+      - --set=bundles.cvat.resource=/api/auth/rules
+      - --set=bundles.cvat.polling.min_delay_seconds=5
+      - --set=bundles.cvat.polling.max_delay_seconds=15
+
+  # Traefik - Reverse Proxy для CVAT
+  traefik:
+    image: traefik:v2.11
+    container_name: traefik
+    command:
+      - "--providers.docker=true"
+      - "--providers.docker.exposedByDefault=false"
+      - "--providers.docker.network=cvat"
+      - "--entryPoints.web.address=:8080"
+      - "--log.level=WARN"
+    ports:
+      - "8080:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    restart: unless-stopped
+    networks:
+      - cvat
+
+# =============================================================================
+# Volumes
+# =============================================================================
 volumes:
+  # P&ID Pipeline
   postgres_data:
     name: pid_postgres_data
   redis_data:
     name: pid_redis_data
-  storage_data:
-    name: pid_storage_data
-  models_data:
-    name: pid_models_data
 
+  # CVAT
+  cvat_db:
+    name: cvat_db
+  cvat_redis_inmem:
+    name: cvat_redis_inmem
+  cvat_redis_ondisk:
+    name: cvat_redis_ondisk
+  cvat_data:
+    name: cvat_data
+  cvat_keys:
+    name: cvat_keys
+  cvat_logs:
+    name: cvat_logs
+
+# =============================================================================
+# Networks
+# =============================================================================
 networks:
   pid_network:
     name: pid_network
     driver: bridge
+  cvat:
+    name: cvat
+    driver: bridge
+

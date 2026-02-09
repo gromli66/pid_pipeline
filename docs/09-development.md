@@ -2,99 +2,127 @@
 
 ## 9.1 Настройка окружения разработки
 
-### Шаг 1: Клонирование и настройка
+### Вариант 1: Всё в Docker (рекомендуется)
 
 ```powershell
-git clone <repository-url>
-cd pid_pipeline
+# Запустить все сервисы
+docker-compose up -d
 
-# Создать .env
-copy .env.example .env
-notepad .env  # Настроить параметры
+# Применить миграции
+docker exec -it pid_api alembic upgrade head
+
+# Код автоматически перезагружается благодаря bind mounts
 ```
 
-### Шаг 2: Виртуальное окружение
+### Вариант 2: Гибридный (API локально, остальное в Docker)
 
 ```powershell
+# 1. Запустить инфраструктуру
+docker-compose up -d postgres redis cvat_server cvat_ui traefik cvat_opa cvat_db cvat_redis_inmem cvat_redis_ondisk
+
+# 2. Создать venv
 python -m venv .venv
 .venv\Scripts\activate
 
-# Установить все зависимости
+# 3. Установить PyTorch
+pip install torch==2.6.0 torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cu124
+
+# 4. Установить зависимости
 pip install -r requirements/api.txt
-pip install -r requirements/worker.txt
-pip install -r requirements/ui.txt
-pip install -r requirements/dev.txt
-```
 
-### Шаг 3: Запуск инфраструктуры
-
-```powershell
-docker-compose up -d postgres redis
-```
-
-### Шаг 4: Инициализация БД
-
-```powershell
-python scripts/init_db.py
-```
-
----
-
-## 9.2 Запуск компонентов
-
-### API (с hot reload)
-
-```powershell
+# 5. Запустить API
 uvicorn app.main:app --reload --port 8000
 ```
 
-### Celery Worker
+---
+
+## 9.2 Работа с миграциями
+
+### Создание миграции
+
+После изменения моделей в `app/models/`:
 
 ```powershell
-celery -A worker.celery_app worker --loglevel=info
+# Через Docker (рекомендуется)
+docker exec -it pid_api alembic revision --autogenerate -m "Add new field"
+
+# Локально (если API запущен локально)
+alembic revision --autogenerate -m "Add new field"
 ```
 
-### UI (PySide6)
+### Применение миграций
 
 ```powershell
-python -m ui.main
+# Через Docker
+docker exec -it pid_api alembic upgrade head
+
+# Локально
+alembic upgrade head
 ```
 
-### Все вместе (разные терминалы)
+### Откат миграции
 
+```powershell
+# Откатить последнюю
+docker exec -it pid_api alembic downgrade -1
+
+# Откатить до конкретной
+docker exec -it pid_api alembic downgrade 6d4b720721f2
 ```
-Terminal 1: docker-compose up postgres redis
-Terminal 2: uvicorn app.main:app --reload
-Terminal 3: celery -A worker.celery_app worker --loglevel=info
-Terminal 4: python -m ui.main
+
+### Просмотр истории
+
+```powershell
+# Текущая версия
+docker exec -it pid_api alembic current
+
+# История миграций
+docker exec -it pid_api alembic history
 ```
+
+### Важно!
+
+- Файлы миграций создаются в `alembic/versions/`
+- **Коммитьте их в git** — они нужны на всех машинах
+- При первом запуске на новой машине — только `alembic upgrade head`
 
 ---
 
-## 9.3 Структура кода
+## 9.3 Добавление нового API endpoint
 
-### Добавление нового API endpoint
-
-1. Создать/изменить файл в `app/api/`:
+### Шаг 1: Создать файл в `app/api/`
 
 ```python
 # app/api/my_feature.py
-from fastapi import APIRouter, Depends
+from uuid import UUID
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.db import get_async_db
+from app.models import Diagram, DiagramStatus
 
 router = APIRouter()
 
-@router.post("/{uid}/action")
+
+@router.post("/{uid}/my-action")
 async def my_action(
     uid: UUID,
     db: AsyncSession = Depends(get_async_db),
 ):
-    # Логика
-    return {"status": "ok"}
+    """Описание endpoint."""
+    result = await db.execute(select(Diagram).where(Diagram.uid == uid))
+    diagram = result.scalar_one_or_none()
+    
+    if not diagram:
+        raise HTTPException(status_code=404, detail="Diagram not found")
+    
+    # Логика...
+    
+    return {"status": "ok", "uid": str(uid)}
 ```
 
-2. Зарегистрировать в `app/main.py`:
+### Шаг 2: Зарегистрировать в `app/main.py`
 
 ```python
 from app.api import my_feature
@@ -106,76 +134,148 @@ app.include_router(
 )
 ```
 
-### Добавление новой Celery задачи
+---
 
-1. Создать файл в `worker/tasks/`:
+## 9.4 Добавление Celery задачи
+
+### Шаг 1: Создать файл в `worker/tasks/`
 
 ```python
 # worker/tasks/my_task.py
+import os
+import sys
+from pathlib import Path
+
 from worker.celery_app import celery_app
 
-@celery_app.task(bind=True, name="worker.tasks.my_task.task_name")
-def task_name(self, diagram_uid: str):
-    # Логика
-    return {"status": "success"}
+
+@celery_app.task(
+    bind=True,
+    name="worker.tasks.my_task.task_my_action",
+    max_retries=2,
+    default_retry_delay=60,
+    time_limit=1800,
+)
+def task_my_action(self, diagram_uid: str):
+    """
+    Описание задачи.
+    """
+    # Добавляем пути для импорта
+    sys.path.insert(0, "/app")
+    
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from app.models import Diagram, DiagramStatus
+    
+    DATABASE_URL = os.getenv("DATABASE_URL")
+    engine = create_engine(DATABASE_URL)
+    SessionLocal = sessionmaker(bind=engine)
+    db = SessionLocal()
+    
+    try:
+        diagram = db.query(Diagram).filter(Diagram.uid == diagram_uid).first()
+        if not diagram:
+            raise ValueError(f"Diagram {diagram_uid} not found")
+        
+        # Логика...
+        
+        diagram.status = DiagramStatus.COMPLETED
+        db.commit()
+        
+        return {"status": "success", "diagram_uid": diagram_uid}
+        
+    except Exception as exc:
+        # Обработка ошибок
+        if self.request.retries < self.max_retries:
+            raise self.retry(exc=exc)
+        raise
+        
+    finally:
+        db.close()
 ```
 
-2. Добавить в `worker/celery_app.py`:
+### Шаг 2: Добавить в `worker/celery_app.py`
 
 ```python
 celery_app = Celery(
     include=[
-        ...
-        "worker.tasks.my_task",
+        "worker.tasks.detection",
+        "worker.tasks.segmentation",
+        "worker.tasks.my_task",  # ← Добавить
     ]
 )
 ```
 
-### Добавление новой модели БД
+### Шаг 3: Вызов из API
 
-1. Создать модель в `app/models/`:
+```python
+from worker.celery_app import celery_app
+
+task = celery_app.send_task(
+    "worker.tasks.my_task.task_my_action",
+    args=[str(uid)],
+)
+```
+
+---
+
+## 9.5 Добавление модели БД
+
+### Шаг 1: Создать модель
 
 ```python
 # app/models/my_model.py
-from sqlalchemy import Column, Integer, String
+from sqlalchemy import Column, Integer, String, ForeignKey
+from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import relationship
+
 from app.db.base import Base
+
 
 class MyModel(Base):
     __tablename__ = "my_models"
     
     id = Column(Integer, primary_key=True)
+    diagram_uid = Column(UUID(as_uuid=True), ForeignKey("diagrams.uid"))
     name = Column(String(100))
+    
+    diagram = relationship("Diagram", back_populates="my_models")
 ```
 
-2. Добавить в `app/models/__init__.py`:
+### Шаг 2: Добавить в `app/models/__init__.py`
 
 ```python
 from app.models.my_model import MyModel
 ```
 
-3. Создать миграцию:
+### Шаг 3: Добавить в `alembic/env.py`
+
+```python
+from app.models import Diagram, Artifact, ProcessingStage, Project, MyModel
+```
+
+### Шаг 4: Создать миграцию
 
 ```powershell
-alembic revision --autogenerate -m "Add MyModel"
-alembic upgrade head
+docker exec -it pid_api alembic revision --autogenerate -m "Add MyModel"
+docker exec -it pid_api alembic upgrade head
 ```
 
 ---
 
-## 9.4 Тестирование
+## 9.6 Тестирование
 
 ### Структура тестов
 
 ```
 tests/
-├── conftest.py          # Фикстуры pytest
+├── conftest.py              # Фикстуры pytest
 ├── test_api/
 │   ├── test_diagrams.py
 │   └── test_detection.py
 ├── test_worker/
 │   └── test_tasks.py
 └── test_ui/
-    └── test_widgets.py
 ```
 
 ### Запуск тестов
@@ -188,363 +288,212 @@ pytest
 pytest --cov=app --cov=worker
 
 # Конкретный файл
-pytest tests/test_api/test_diagrams.py
-
-# Verbose
-pytest -v
-```
-
-### Пример теста
-
-```python
-# tests/test_api/test_diagrams.py
-import pytest
-from httpx import AsyncClient
-from app.main import app
-
-@pytest.mark.asyncio
-async def test_health_check():
-    async with AsyncClient(app=app, base_url="http://test") as client:
-        response = await client.get("/health")
-        assert response.status_code == 200
-        assert response.json()["status"] == "healthy"
-```
-
----
-
-## 9.5 Code Style
-
-### Линтинг (Ruff)
-
-```powershell
-# Проверка
-ruff check app/ worker/
-
-# Автоисправление
-ruff check --fix app/ worker/
-```
-
-### Type checking (MyPy)
-
-```powershell
-mypy app/ worker/
-```
-
-### Форматирование
-
-Используем настройки по умолчанию Ruff (совместим с Black).
-
----
-
-## 9.6 Git Workflow
-
-### Ветки
-
-- `main` — стабильная версия
-- `develop` — текущая разработка
-- `feature/xxx` — новые фичи
-- `bugfix/xxx` — исправления
-
-### Коммиты
-
-```
-feat: добавлена детекция YOLO
-fix: исправлена ошибка загрузки файлов
-docs: обновлена документация API
-refactor: рефакторинг StorageService
-test: добавлены тесты для diagrams API
-```
-
-### Pull Request
-
-1. Создать ветку от `develop`
-2. Сделать изменения
-3. Запустить тесты
-4. Создать PR в `develop`
-5. Code review
-6. Merge
-
----
-
-## 9.7 Debugging
-
-### API (FastAPI)
-
-```python
-# Включить debug mode
-# .env
-API_DEBUG=true
-
-# Или в коде
-import logging
-logging.basicConfig(level=logging.DEBUG)
-```
-
-### Celery
-
-```powershell
-# Verbose logging
-celery -A worker.celery_app worker --loglevel=debug
-
-# Отладка конкретной задачи
-python -c "from worker.tasks.detection import task_detect_yolo; task_detect_yolo('uuid')"
-```
-
-### Database
-
-```python
-# Включить SQL logging
-# app/db/session.py
-engine = create_engine(DATABASE_URL, echo=True)
-```
-
-### PySide6
-
-```python
-# Включить Qt debugging
-import os
-os.environ["QT_DEBUG_PLUGINS"] = "1"
-```
-
----
-
-## 9.8 Частые задачи
-
-### Сброс базы данных
-
-```powershell
-python scripts/init_db.py --drop
-```
-
-### Очистка storage
-
-```powershell
-Remove-Item -Recurse -Force storage\diagrams\*
-```
-
-### Перезапуск worker
-
-```powershell
-# Остановить
-Ctrl+C
-
-# Очистить очереди
-celery -A worker.celery_app purge
-
-# Запустить заново
-celery -A worker.celery_app worker --loglevel=info
-```
-
-### Проверка подключения к CVAT
-
-```powershell
-curl http://localhost:8080/api/server/about
-```
-
----
-
-## 9.9 IDE настройки
-
-### VS Code
-
-`.vscode/settings.json`:
-```json
-{
-    "python.defaultInterpreterPath": "${workspaceFolder}/.venv/Scripts/python.exe",
-    "python.linting.enabled": true,
-    "python.linting.ruffEnabled": true,
-    "python.formatting.provider": "none",
-    "[python]": {
-        "editor.defaultFormatter": "charliermarsh.ruff",
-        "editor.formatOnSave": true
-    }
-}
-```
-
-### PyCharm
-
-1. File → Settings → Project → Python Interpreter
-2. Выбрать `.venv`
-3. Enable Ruff plugin
-
----
-
-## 9.10 Полезные команды
-
-```powershell
-# Статус Docker контейнеров
-docker-compose ps
-
-# Логи API
-docker-compose logs -f api
-
-# Подключиться к PostgreSQL
-docker-compose exec postgres psql -U pid_user -d pid_pipeline
-
-# Redis CLI
-docker-compose exec redis redis-cli
-
-# Проверить Celery workers
-celery -A worker.celery_app status
-
-# Inspect активные задачи
-celery -A worker.celery_app inspect active
-```л
-pytest tests/test_api/test_diagrams.py
-
-# Verbose
-pytest -v
+pytest tests/test_api/test_diagrams.py -v
 ```
 
 ### Пример теста API
 
 ```python
-# tests/test_api/test_diagrams.py
+# tests/test_api/test_health.py
 import pytest
-from httpx import AsyncClient
+from httpx import AsyncClient, ASGITransport
 from app.main import app
+
 
 @pytest.mark.asyncio
 async def test_health_check():
-    async with AsyncClient(app=app, base_url="http://test") as client:
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.get("/health")
         assert response.status_code == 200
         assert response.json()["status"] == "healthy"
 ```
 
-### Фикстуры
+---
+
+## 9.7 Логирование
+
+### В API
 
 ```python
-# tests/conftest.py
-import pytest
-from sqlalchemy import create_engine
-from app.db.base import Base
+import structlog
+logger = structlog.get_logger()
 
-@pytest.fixture
-def test_db():
-    engine = create_engine("sqlite:///:memory:")
-    Base.metadata.create_all(engine)
-    yield engine
-    Base.metadata.drop_all(engine)
+logger.info("Processing diagram", uid=str(uid), status=diagram.status.value)
+logger.error("Failed to process", error=str(exc), exc_info=True)
+```
+
+### В Worker
+
+```python
+print(f"🔍 Starting detection for {diagram_uid}")
+print(f"✅ Detected {count} objects")
+print(f"❌ Error: {exc}")
+```
+
+### Просмотр логов
+
+```powershell
+# API логи
+docker logs -f pid_api
+
+# Worker логи
+docker logs -f pid_worker
+
+# Последние 100 строк
+docker logs --tail 100 pid_api
 ```
 
 ---
 
-## 9.5 Стиль кода
+## 9.8 Отладка
 
-### Линтинг (Ruff)
+### Отладка API
 
 ```powershell
-# Проверка
-ruff check app/ worker/
+# Включить debug режим (в .env)
+LOG_LEVEL=DEBUG
 
-# Автоисправление
-ruff check --fix app/ worker/
+# Перезапустить
+docker-compose restart api
 ```
 
-### Форматирование
+### Отладка Worker
 
 ```powershell
-ruff format app/ worker/
+# Логи в реальном времени
+docker logs -f pid_worker
+
+# Выполнить задачу вручную
+docker exec -it pid_worker python -c "
+from worker.tasks.detection import task_detect_yolo
+result = task_detect_yolo('your-uuid-here')
+print(result)
+"
 ```
 
-### Type checking (MyPy)
+### Отладка БД
 
 ```powershell
-mypy app/ worker/
+# Подключиться к PostgreSQL
+docker exec -it pid_postgres psql -U pid_user -d pid_pipeline
+
+# SQL запросы
+SELECT * FROM diagrams ORDER BY created_at DESC LIMIT 5;
+SELECT * FROM artifacts WHERE diagram_uid = 'xxx';
 ```
 
 ---
 
-## 9.6 Git workflow
+## 9.9 Полезные команды
+
+### Docker
+
+```powershell
+# Статус контейнеров
+docker ps
+
+# Логи конкретного сервиса
+docker logs -f pid_api
+
+# Зайти в контейнер
+docker exec -it pid_api bash
+
+# Перезапустить сервис
+docker-compose restart api
+
+# Пересобрать и запустить
+docker-compose up -d --build api
+```
+
+### Alembic
+
+```powershell
+# Создать миграцию
+docker exec -it pid_api alembic revision --autogenerate -m "Description"
+
+# Применить
+docker exec -it pid_api alembic upgrade head
+
+# Текущая версия
+docker exec -it pid_api alembic current
+
+# История
+docker exec -it pid_api alembic history
+```
+
+### PostgreSQL
+
+```powershell
+# Подключиться
+docker exec -it pid_postgres psql -U pid_user -d pid_pipeline
+
+# Список таблиц
+\dt
+
+# Описание таблицы
+\d diagrams
+
+# Выход
+\q
+```
+
+### Redis
+
+```powershell
+# Redis CLI
+docker exec -it pid_redis redis-cli
+
+# Просмотр ключей
+KEYS *
+
+# Очистить очереди Celery
+FLUSHALL
+```
+
+### Celery
+
+```powershell
+# Статус воркеров
+docker exec -it pid_worker celery -A worker.celery_app status
+
+# Активные задачи
+docker exec -it pid_worker celery -A worker.celery_app inspect active
+
+# Очистить очередь
+docker exec -it pid_worker celery -A worker.celery_app purge
+```
+
+---
+
+## 9.10 Git Workflow
 
 ### Ветки
 
 - `main` — стабильная версия
-- `develop` — разработка
+- `develop` — текущая разработка
 - `feature/xxx` — новые функции
 - `fix/xxx` — исправления
 
 ### Коммиты
-
-Формат: `type(scope): description`
 
 ```
 feat(api): add segmentation endpoint
 fix(worker): handle timeout in detection
 docs(readme): update installation guide
 refactor(models): rename Diagram fields
+chore(deps): update dependencies
 ```
 
----
-
-## 9.7 Отладка
-
-### FastAPI
-
-```python
-# Включить debug в .env
-API_DEBUG=true
-
-# Или в коде
-import logging
-logging.basicConfig(level=logging.DEBUG)
-```
-
-### Celery
+### Перед коммитом
 
 ```powershell
-# Verbose logging
-celery -A worker.celery_app worker --loglevel=debug
-```
+# Проверить что тесты проходят
+pytest
 
-### SQL queries
+# Проверить линтинг
+ruff check app/ worker/
 
-```python
-# В session.py
-engine = create_engine(url, echo=True)  # Логировать SQL
-```
-
----
-
-## 9.8 Частые задачи
-
-### Сбросить БД
-
-```powershell
-python scripts/init_db.py --drop
-```
-
-### Очистить storage
-
-```powershell
-Remove-Item -Recurse -Force storage\diagrams\*
-```
-
-### Перезапустить worker
-
-```powershell
-# Очистить очередь Redis
-docker-compose exec redis redis-cli FLUSHALL
-
-# Запустить заново
-celery -A worker.celery_app worker --loglevel=info
-```
-
----
-
-## 9.9 IDE настройки
-
-### VS Code
-
-```json
-// .vscode/settings.json
-{
-    "python.defaultInterpreterPath": "${workspaceFolder}/.venv/Scripts/python.exe",
-    "python.linting.enabled": true,
-    "[python]": {
-        "editor.defaultFormatter": "charliermarsh.ruff",
-        "editor.formatOnSave": true
-    }
-}
+# Проверить что миграции закоммичены
+git status alembic/versions/
 ```

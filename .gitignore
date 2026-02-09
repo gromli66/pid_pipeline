@@ -1,6 +1,7 @@
 # Environment
 .env
 .venv/
+.venv311/
 venv/
 env/
 
@@ -58,3 +59,9 @@ alembic/versions/*.pyc
 # Archives
 *.zip
 *.rar
+# CVAT WebView cache (UI)
+cvat_webview_data/
+
+# OS
+.DS_Store
+Thumbs.db

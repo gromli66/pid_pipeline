@@ -6,6 +6,7 @@ Node Detector - YOLO + SAHI inference для P&ID схем.
 - Адаптивный SAHI слайсинг под размер изображения
 - Поддержка CUDA/CPU
 - Обратная переиндексация классов (reverse_reindex): 34→35 (output), 35→38 (strelka)
+- Class-agnostic NMS для фильтрации дубликатов между разными классами
 """
 
 import cv2
@@ -55,7 +56,8 @@ class NodeDetector:
         device: str = "cuda",
         use_sahi: bool = True,
         adaptive_slicing: bool = True,
-        apply_preprocessing: bool = True,
+        apply_preprocessing: bool = False,
+        class_agnostic_nms: bool = False,
         class_names: Optional[Dict[int, str]] = None,
         reverse_reindex: Optional[Dict[int, int]] = None,
     ):
@@ -68,6 +70,10 @@ class NodeDetector:
             use_sahi: Использовать SAHI для больших изображений
             adaptive_slicing: Автоподбор параметров слайсинга
             apply_preprocessing: Применять preprocessing (NLM+CLAHE+Otsu+Erode)
+            class_agnostic_nms: Cross-class NMS - фильтрация дубликатов между разными классами.
+                                Если True, боксы разных классов с высоким IoU будут отфильтрованы,
+                                останется бокс с большим confidence. Решает проблему дубликатов
+                                на границах тайлов, когда один объект детектируется как разные классы.
             class_names: Маппинг id → имя класса (если None, используется из config)
             reverse_reindex: Маппинг для обратной переиндексации (если None, используется из config)
         """
@@ -78,6 +84,7 @@ class NodeDetector:
         self.use_sahi = use_sahi
         self.adaptive_slicing = adaptive_slicing
         self.apply_preprocessing = apply_preprocessing
+        self.class_agnostic_nms = class_agnostic_nms
 
         # Маппинги классов
         self.class_names = class_names if class_names is not None else CLASS_NAMES
@@ -243,7 +250,7 @@ class NodeDetector:
         else:
             detections = self._detect_direct(img, img_width, img_height)
 
-        # ===== ИСПРАВЛЕНИЕ: Применяем обратную переиндексацию =====
+        # Применяем обратную переиндексацию
         if apply_reverse_mapping:
             detections = self._apply_reverse_reindex(detections)
 
@@ -281,6 +288,7 @@ class NodeDetector:
             postprocess_type="NMS",
             postprocess_match_metric="IOU",
             postprocess_match_threshold=self.iou_threshold,
+            postprocess_class_agnostic=self.class_agnostic_nms,
             verbose=0,
         )
 
@@ -356,10 +364,12 @@ def detections_to_yolo(detections: List[Dict], include_confidence: bool = False)
 
     Args:
         detections: Список детекций от NodeDetector
-        include_confidence: Добавить confidence в конец строки
+        include_confidence: Добавить confidence в конец строки (по умолчанию False)
 
     Returns:
-        Строка в YOLO формате (class x_center y_center width height [conf])
+        Строка в YOLO формате:
+        - include_confidence=False: "class x_center y_center width height"
+        - include_confidence=True:  "class x_center y_center width height conf"
     """
     lines = []
     for det in detections:
